@@ -86,10 +86,6 @@ readonly MACOS_DEPLOYMENT_TARGET="13.0"
 
 # Determine the default backend flag for this host.
 backend_flag_for_host() {
-  if [[ "${OPENSCREEN_WHISPER_BACKEND:-}" == "cpu" ]]; then
-    echo "-DOSC_ENABLE_VULKAN=OFF"
-    return
-  fi
   case "${OS_ARCH}" in
     darwin-arm64) echo "-DOSC_ENABLE_METAL=ON" ;;
     darwin-x64)   echo "" ;;

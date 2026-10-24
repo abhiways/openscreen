@@ -184,7 +184,7 @@ describe("mapHyprlandCursorToCapture", () => {
 		expect(sample).toMatchObject({ cx: 500 / 1280, cy: 300 / 800, visible: true });
 	});
 
-	it("uses the containing monitor for a smaller window stream", async () => {
+	it("does not invent a window origin when the portal omits it", async () => {
 		process.env.XDG_RUNTIME_DIR = "/tmp/openscreen-hypr-runtime";
 		process.env.HYPRLAND_INSTANCE_SIGNATURE = "window-geometry-fallback";
 		vi.spyOn(net, "createConnection").mockImplementation(() => {
@@ -215,12 +215,11 @@ describe("mapHyprlandCursorToCapture", () => {
 		});
 
 		const tracker = new HyprlandCursorTracker({ sampleIntervalMs: 10, maxSamples: 10 });
-		tracker.setCaptureGeometry({ width: 1234, height: 720 });
+		tracker.setCaptureGeometry({ width: 1234, height: 720, allowMonitorOriginFallback: false });
 		tracker.start();
 		await new Promise((resolve) => setTimeout(resolve, 60));
 
-		const sample = tracker.stop().samples[0];
-		expect(sample).toMatchObject({ cx: 134 / 1234, cy: 264 / 720, visible: true });
+		expect(tracker.stop().samples).toEqual([]);
 	});
 
 	it("corrects a zero portal origin for a uniquely sized monitor", async () => {

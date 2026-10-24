@@ -102,8 +102,8 @@ import {
 	LinuxNativeCaptureSession,
 } from "../native-bridge/capture/linuxNativeCaptureSession";
 import { compactCursorTelemetryPauseRanges } from "../native-bridge/cursor/recording/cursorPauseRanges";
-import { HyprlandCursorTracker } from "../native-bridge/cursor/recording/hyprlandCursorTracker";
 import { createCursorRecordingSession } from "../native-bridge/cursor/recording/factory";
+import { HyprlandCursorTracker } from "../native-bridge/cursor/recording/hyprlandCursorTracker";
 import {
 	isMacCursorHelperUnavailable,
 	requestMacCursorAccessibilityAccess,
@@ -2631,10 +2631,7 @@ export function registerIpcHandlers(
 
 				const session = new LinuxNativeCaptureSession({
 					outputPath,
-					cursorMode: portalCursorMode(
-						cursorCaptureMode,
-						HyprlandCursorTracker.isAvailable(),
-					),
+					cursorMode: portalCursorMode(cursorCaptureMode, HyprlandCursorTracker.isAvailable()),
 					sampleIntervalMs: CURSOR_SAMPLE_INTERVAL_MS,
 					fps: request.video.fps,
 					...(request.video.bitrate ? { bitrate: request.video.bitrate } : {}),
@@ -2721,10 +2718,7 @@ export function registerIpcHandlers(
 					prepared ??
 					new LinuxNativeCaptureSession({
 						outputPath,
-						cursorMode: portalCursorMode(
-							cursorCaptureMode,
-						HyprlandCursorTracker.isAvailable(),
-						),
+						cursorMode: portalCursorMode(cursorCaptureMode, HyprlandCursorTracker.isAvailable()),
 						sampleIntervalMs: CURSOR_SAMPLE_INTERVAL_MS,
 						fps: request.video.fps,
 						...(request.video.bitrate ? { bitrate: request.video.bitrate } : {}),

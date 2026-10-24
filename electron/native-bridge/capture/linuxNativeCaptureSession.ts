@@ -180,6 +180,7 @@ export class LinuxNativeCaptureSession {
 		});
 		child.once("exit", (code, signal) => {
 			this.process = null;
+			if (!this.stopped) this.stopHyprlandCursorTracker();
 			const reason =
 				this.lastError ??
 				`the Linux capture helper exited (code=${code ?? "null"}, signal=${signal ?? "null"})`;
@@ -206,6 +207,7 @@ export class LinuxNativeCaptureSession {
 		});
 		child.once("error", (error) => {
 			this.process = null;
+			this.stopHyprlandCursorTracker();
 			this.rejectReady(error);
 		});
 
@@ -560,7 +562,7 @@ export class LinuxNativeCaptureSession {
 				this.ensureHyprlandCursorTracker(
 					(this.config.cursorMode === "auto" &&
 						(this.effectiveCursorMode !== "metadata" || this.cursorMetadataSupported === false)) ||
-					this.effectiveCursorMode === "hidden",
+						this.effectiveCursorMode === "hidden",
 				);
 				if (this.hyprlandCursor && !this.hyprlandCursor.hasCaptureGeometry()) {
 					this.hyprlandCursor.setCaptureGeometry({
@@ -570,6 +572,7 @@ export class LinuxNativeCaptureSession {
 								: null,
 						width: payload.logicalWidth ?? payload.width,
 						height: payload.logicalHeight ?? payload.height,
+						allowMonitorOriginFallback: payload.sourceKind !== "window",
 					});
 				}
 				return;
@@ -611,7 +614,7 @@ export class LinuxNativeCaptureSession {
 				this.ensureHyprlandCursorTracker(
 					(this.config.cursorMode === "auto" &&
 						(this.effectiveCursorMode !== "metadata" || this.cursorMetadataSupported === false)) ||
-					this.effectiveCursorMode === "hidden",
+						this.effectiveCursorMode === "hidden",
 				);
 				this.hyprlandCursor?.rebase();
 				// Older helper builds and some portal backends may omit stream-started
@@ -622,6 +625,7 @@ export class LinuxNativeCaptureSession {
 						position: null,
 						width: payload.width,
 						height: payload.height,
+						allowMonitorOriginFallback: this.sourceKind !== "window",
 					});
 				}
 				this.capturing = true;
@@ -702,6 +706,11 @@ export class LinuxNativeCaptureSession {
 			maxSamples: this.config.maxCursorSamples,
 		});
 		this.hyprlandCursor.start();
+	}
+
+	private stopHyprlandCursorTracker() {
+		this.hyprlandCursor?.stop();
+		this.hyprlandCursor = null;
 	}
 
 	private resolveReady() {

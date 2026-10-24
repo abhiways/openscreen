@@ -58,10 +58,16 @@ impl CursorMode {
         matches!(self, Self::Metadata)
     }
 
-    pub fn resolve(self, metadata_supported: bool, hidden_supported: bool) -> Self {
+    pub fn resolve(
+        self,
+        metadata_supported: bool,
+        hidden_supported: bool,
+        embedded_supported: bool,
+    ) -> Self {
         match self {
             Self::Auto if metadata_supported => Self::Metadata,
             Self::Auto if hidden_supported => Self::Hidden,
+            Self::Embedded if !embedded_supported && metadata_supported => Self::Metadata,
             Self::Auto => Self::Embedded,
             other => other,
         }
@@ -194,6 +200,7 @@ fn portal_unavailable(error: impl std::fmt::Display) -> PortalError {
 pub struct CursorCapabilities {
     pub metadata: bool,
     pub hidden: bool,
+    pub embedded: bool,
 }
 
 pub async fn cursor_capabilities() -> Result<CursorCapabilities, PortalError> {
@@ -205,6 +212,7 @@ pub async fn cursor_capabilities() -> Result<CursorCapabilities, PortalError> {
     Ok(CursorCapabilities {
         metadata: cursor_modes.contains(PortalCursorMode::Metadata),
         hidden: cursor_modes.contains(PortalCursorMode::Hidden),
+        embedded: cursor_modes.contains(PortalCursorMode::Embedded),
     })
 }
 
@@ -215,11 +223,19 @@ mod tests {
     #[test]
     fn auto_prefers_metadata_then_hidden_then_embedded() {
         assert_eq!(
-            CursorMode::Auto.resolve(true, true),
+            CursorMode::Auto.resolve(true, true, true),
             CursorMode::Metadata
         );
-        assert_eq!(CursorMode::Auto.resolve(false, true), CursorMode::Hidden);
-        assert_eq!(CursorMode::Auto.resolve(false, false), CursorMode::Embedded);
+        assert_eq!(CursorMode::Auto.resolve(false, true, true), CursorMode::Hidden);
+        assert_eq!(CursorMode::Auto.resolve(false, false, true), CursorMode::Embedded);
+        assert_eq!(
+            CursorMode::Embedded.resolve(true, true, false),
+            CursorMode::Metadata
+        );
+        assert_eq!(
+            CursorMode::Embedded.resolve(true, true, true),
+            CursorMode::Embedded
+        );
     }
 }
 
@@ -243,6 +259,7 @@ pub async fn negotiate(cursor_mode: CursorMode) -> Result<PortalStream, PortalEr
     let cursor_mode = cursor_mode.resolve(
         cursor_modes.contains(PortalCursorMode::Metadata),
         cursor_modes.contains(PortalCursorMode::Hidden),
+        cursor_modes.contains(PortalCursorMode::Embedded),
     );
     if !cursor_modes.contains(cursor_mode.to_portal()) {
         return Err(match cursor_mode {

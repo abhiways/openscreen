@@ -158,32 +158,43 @@ function visiblePositionMoments(
 	totalMs: number,
 	ignoreFromMs: number,
 ): RecordedClick[] {
-	const points = normalizeCursorTelemetry(samples, totalMs).filter(
-		(sample) => sample.visible !== false && sample.timeMs < ignoreFromMs,
-	);
-	if (points.length === 0) return [];
+	const normalized = normalizeCursorTelemetry(samples, totalMs);
+	if (normalized.length === 0) return [];
 
 	const moments: RecordedClick[] = [];
 	let cluster: CursorTelemetryPoint[] = [];
 	let sumX = 0;
 	let sumY = 0;
 	let center = { cx: 0, cy: 0 };
+	const reset = () => {
+		cluster = [];
+		sumX = 0;
+		sumY = 0;
+		center = { cx: 0, cy: 0 };
+	};
 	const flush = () => {
 		if (cluster.length < 2) return;
 		const start = cluster[0].timeMs;
 		const end = cluster[cluster.length - 1].timeMs;
 		if (end - start < POSITION_MOMENT_MIN_MS) return;
-		const middle = cluster[Math.floor(cluster.length / 2)];
-		moments.push({ timeMs: middle.timeMs, focus: { cx: middle.cx, cy: middle.cy } });
+		const timeMs = (start + end) / 2;
+		const middle = cluster.reduce((nearest, sample) =>
+			Math.abs(sample.timeMs - timeMs) < Math.abs(nearest.timeMs - timeMs) ? sample : nearest,
+		);
+		moments.push({ timeMs, focus: { cx: middle.cx, cy: middle.cy } });
 	};
 
-	for (const point of points) {
+	for (const point of normalized) {
+		if (point.timeMs >= ignoreFromMs) break;
+		if (point.visible === false) {
+			flush();
+			reset();
+			continue;
+		}
 		const distance = Math.hypot(point.cx - center.cx, point.cy - center.cy);
 		if (cluster.length > 0 && distance > POSITION_CLUSTER_RADIUS) {
 			flush();
-			cluster = [];
-			sumX = 0;
-			sumY = 0;
+			reset();
 		}
 		cluster.push(point);
 		sumX += point.cx;

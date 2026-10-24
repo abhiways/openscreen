@@ -1,5 +1,5 @@
-import net from "node:net";
 import { existsSync, readdirSync } from "node:fs";
+import net from "node:net";
 import { hrtime } from "node:process";
 import type { CursorRecordingData, CursorRecordingSample } from "../../../../src/native/contracts";
 
@@ -23,6 +23,17 @@ export interface HyprlandCaptureGeometry {
 	position?: { x: number; y: number } | null;
 	width: number;
 	height: number;
+	/** False for window streams when the portal omitted the window origin. */
+	allowMonitorOriginFallback?: boolean;
+}
+
+function monitorLogicalSize(monitor: HyprlandMonitorGeometry) {
+	const scale = monitor.scale && monitor.scale > 0 ? monitor.scale : 1;
+	const swap = (monitor.transform ?? 0) % 2 === 1;
+	return {
+		width: (swap ? monitor.height : monitor.width) / scale,
+		height: (swap ? monitor.width : monitor.height) / scale,
+	};
 }
 
 export function mapHyprlandCursorToCapture(
@@ -30,13 +41,15 @@ export function mapHyprlandCursorToCapture(
 	monitors: HyprlandMonitorGeometry[],
 	capture: HyprlandCaptureRect,
 ) {
-	const monitor = monitors.find(
-		(candidate) =>
+	const monitor = monitors.find((candidate) => {
+		const { width, height } = monitorLogicalSize(candidate);
+		return (
 			point.x >= candidate.x &&
 			point.y >= candidate.y &&
-			point.x < candidate.x + candidate.width &&
-			point.y < candidate.y + candidate.height,
-	);
+			point.x < candidate.x + width &&
+			point.y < candidate.y + height
+		);
+	});
 	const transform = monitor?.transform ?? 0;
 	const logicalX = point.x - capture.x;
 	const logicalY = point.y - capture.y;
@@ -78,12 +91,9 @@ function hyprlandSocketPath() {
 	// the one live socket rather than disabling position telemetry in that case.
 	try {
 		const hyprlandRoot = `${runtime}/hypr`;
-		const signature = readdirSync(hyprlandRoot, { withFileTypes: true })
-			.find(
-				(entry) =>
-					entry.isDirectory() && existsSync(`${hyprlandRoot}/${entry.name}/.socket.sock`),
-			)
-			?.name;
+		const signature = readdirSync(hyprlandRoot, { withFileTypes: true }).find(
+			(entry) => entry.isDirectory() && existsSync(`${hyprlandRoot}/${entry.name}/.socket.sock`),
+		)?.name;
 		return signature ? `${hyprlandRoot}/${signature}/.socket.sock` : null;
 	} catch {
 		return null;
@@ -106,7 +116,9 @@ export class HyprlandCursorTracker {
 	private pausedDurationMs = 0;
 	private captureRect: HyprlandCaptureRect | null = null;
 	private captureSize: { width: number; height: number } | null = null;
+	private allowMonitorOriginFallback = true;
 	private lastIpcError: string | null = null;
+	private generation = 0;
 
 	constructor(private readonly options: { sampleIntervalMs: number; maxSamples: number }) {}
 
@@ -115,6 +127,7 @@ export class HyprlandCursorTracker {
 	}
 
 	start() {
+		this.generation += 1;
 		this.stopSocket();
 		this.samples = [];
 		this.startMs = monotonicMs();
@@ -126,6 +139,7 @@ export class HyprlandCursorTracker {
 	}
 
 	stop(): CursorRecordingData {
+		this.generation += 1;
 		if (this.interval) clearInterval(this.interval);
 		this.interval = null;
 		this.stopSocket();
@@ -144,6 +158,7 @@ export class HyprlandCursorTracker {
 	}
 
 	rebase() {
+		this.generation += 1;
 		this.startMs = monotonicMs();
 		this.pausedDurationMs = 0;
 		this.pausedAt = null;
@@ -165,19 +180,21 @@ export class HyprlandCursorTracker {
 		if (!geometry) {
 			this.captureRect = null;
 			this.captureSize = null;
+			this.allowMonitorOriginFallback = true;
 			return;
 		}
+		this.allowMonitorOriginFallback = geometry.allowMonitorOriginFallback ?? true;
 		this.captureSize = {
 			width: Math.max(1, geometry.width),
 			height: Math.max(1, geometry.height),
 		};
 		this.captureRect = geometry.position
 			? {
-				x: geometry.position.x,
-				y: geometry.position.y,
-				width: this.captureSize.width,
-				height: this.captureSize.height,
-			}
+					x: geometry.position.x,
+					y: geometry.position.y,
+					width: this.captureSize.width,
+					height: this.captureSize.height,
+				}
 			: null;
 	}
 
@@ -186,35 +203,40 @@ export class HyprlandCursorTracker {
 	}
 
 	private async sample() {
-		if (this.sampleInFlight || this.pausedAt !== null || (!this.captureRect && !this.captureSize)) return;
+		if (this.sampleInFlight || this.pausedAt !== null || (!this.captureRect && !this.captureSize))
+			return;
+		const generation = this.generation;
 		this.sampleInFlight = true;
 		try {
 			const point = await this.request<{ x: number; y: number }>("j/cursorpos");
 			const now = monotonicMs();
-			const monitors =
-				now - this.monitorCacheAt > 1000
-					? await this.request<HyprlandMonitorGeometry[]>("j/monitors")
-					: this.monitorCache;
-			this.monitorCache = Array.isArray(monitors) ? monitors : this.monitorCache;
-			this.monitorCacheAt = now;
+			if (now - this.monitorCacheAt > 1000 || this.monitorCacheAt === 0) {
+				const refreshed = await this.request<HyprlandMonitorGeometry[]>("j/monitors");
+				if (Array.isArray(refreshed)) {
+					this.monitorCache = refreshed;
+					this.monitorCacheAt = now;
+				}
+			}
 			this.correctPortalOriginForExactMonitor(point);
-			if (!this.captureRect && this.captureSize) {
-				const matches = this.monitorCache.filter(
-					(monitor) => {
-						const scale = monitor.scale && monitor.scale > 0 ? monitor.scale : 1;
-						const widths = [monitor.width, monitor.width / scale].map(Math.round);
-						const heights = [monitor.height, monitor.height / scale].map(Math.round);
-						return widths.includes(this.captureSize?.width ?? -1) &&
-							heights.includes(this.captureSize?.height ?? -1);
-					},
-				);
-				const containing = this.monitorCache.find(
-					(monitor) =>
+			if (!this.captureRect && this.captureSize && this.allowMonitorOriginFallback) {
+				const matches = this.monitorCache.filter((monitor) => {
+					const scale = monitor.scale && monitor.scale > 0 ? monitor.scale : 1;
+					const widths = [monitor.width, monitor.width / scale].map(Math.round);
+					const heights = [monitor.height, monitor.height / scale].map(Math.round);
+					return (
+						widths.includes(this.captureSize?.width ?? -1) &&
+						heights.includes(this.captureSize?.height ?? -1)
+					);
+				});
+				const containing = this.monitorCache.find((monitor) => {
+					const { width, height } = monitorLogicalSize(monitor);
+					return (
 						point.x >= monitor.x &&
 						point.y >= monitor.y &&
-						point.x < monitor.x + monitor.width &&
-						point.y < monitor.y + monitor.height,
-				);
+						point.x < monitor.x + width &&
+						point.y < monitor.y + height
+					);
+				});
 				// Exact size wins for monitor captures. For a window capture whose
 				// portal size is smaller than the monitor, the containing monitor is
 				// the best available origin when the portal omitted Stream.position.
@@ -228,7 +250,7 @@ export class HyprlandCursorTracker {
 					};
 				}
 			}
-			if (!this.captureRect) return;
+			if (!this.captureRect || generation !== this.generation) return;
 			const mapped = mapHyprlandCursorToCapture(point, this.monitorCache, this.captureRect);
 			this.samples.push({
 				timeMs: Math.max(0, now - this.startMs - this.pausedDurationMs),
@@ -268,13 +290,15 @@ export class HyprlandCursorTracker {
 				heights.includes(Math.round(this.captureRect!.height))
 			);
 		});
-		const monitor = matches.find(
-			(candidate) =>
+		const monitor = matches.find((candidate) => {
+			const { width, height } = monitorLogicalSize(candidate);
+			return (
 				point.x >= candidate.x &&
 				point.y >= candidate.y &&
-				point.x < candidate.x + candidate.width &&
-				point.y < candidate.y + candidate.height,
-		);
+				point.x < candidate.x + width &&
+				point.y < candidate.y + height
+			);
+		});
 		if (matches.length === 1 && monitor) {
 			this.captureRect.x = monitor.x;
 			this.captureRect.y = monitor.y;
@@ -313,7 +337,10 @@ export class HyprlandCursorTracker {
 				}
 			});
 			socket.on("error", (error) => settle(error));
-			socket.on("timeout", () => settle(new Error("Hyprland IPC timeout")));
+			socket.on("timeout", () => {
+				socket.destroy();
+				settle(new Error("Hyprland IPC timeout"));
+			});
 			socket.on("close", () => {
 				if (!settled) settle(new Error("Hyprland IPC connection closed"));
 			});

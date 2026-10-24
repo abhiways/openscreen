@@ -291,6 +291,7 @@ fn main() {
     let cursor_mode = requested_cursor_mode.resolve(
         cursor_capabilities.metadata,
         cursor_capabilities.hidden,
+        cursor_capabilities.embedded,
     );
     if !cursor_capabilities.metadata && cursor_mode.reports_cursor() {
         let error = portal::PortalError::CursorMetadataUnsupported;

@@ -134,8 +134,10 @@ describe("buildAutoZoomSuggestions: which clicks count", () => {
 		expect(plan(telemetry)).toEqual([]);
 	});
 
-	it("places no zoom where the pointer only sits still", () => {
-		expect(plan(park(2000, 0.5, 0.5))).toEqual([]);
+	it("uses a stable position when the provider has no click telemetry", () => {
+		const suggestions = plan(park(2000, 0.5, 0.5));
+		expect(suggestions.length).toBeGreaterThan(0);
+		expect(suggestions[0].focus).toEqual({ cx: 0.5, cy: 0.5 });
 	});
 
 	it("returns nothing without telemetry, or for a lone move or mouseup", () => {

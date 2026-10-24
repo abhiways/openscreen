@@ -612,9 +612,11 @@ int osc_pw_enum_format_accepts_dmabuf_producer(int with_modifier, int64_t produc
     const struct spa_pod *consumer;
     const struct spa_pod *producer;
 
-    /* The unit test exercises the full tiled offer, so enumerate unconditionally. */
+    /* Keep this synthetic intersection test independent of the host EGL stack.
+     * Runtime negotiation still calls the same builder with prefer_dmabuf=1;
+     * the test only needs the guaranteed CPU-readable fallback modifiers. */
     consumer =
-        with_modifier ? osc_build_enum_format_dmabuf(&ours, 1) : osc_build_enum_format(&ours);
+        with_modifier ? osc_build_enum_format_dmabuf(&ours, 0) : osc_build_enum_format(&ours);
     if (consumer == NULL) {
         return -1;
     }

@@ -5,6 +5,7 @@ import {
 	type CursorPauseRange,
 	compactCursorTelemetryPauseRanges,
 } from "../cursor/recording/cursorPauseRanges";
+import { HyprlandCursorTracker } from "../cursor/recording/hyprlandCursorTracker";
 import {
 	NdjsonLineReader,
 	PipeWireCursorAccumulator,
@@ -56,7 +57,8 @@ const HELPER_OUTPUT_MAX_BYTES = 64 * 1024;
 
 export interface LinuxCaptureConfig {
 	outputPath: string;
-	cursorMode: "metadata" | "embedded";
+	cursorMode: "auto" | "metadata" | "embedded" | "hidden";
+	sampleIntervalMs?: number;
 	fps: number;
 	bitrate?: number;
 	audio: {
@@ -119,6 +121,9 @@ export class LinuxNativeCaptureSession {
 	private lastError: string | null = null;
 	private paused = false;
 	private helperOutputText = "";
+	private effectiveCursorMode: "metadata" | "embedded" | "hidden" = "metadata";
+	private cursorMetadataSupported: boolean | null = null;
+	private hyprlandCursor: HyprlandCursorTracker | null = null;
 	private cursorRecordingStartMs = 0;
 	private cursorPauseStartedAtMs: number | null = null;
 	private cursorPauseRanges: CursorPauseRange[] = [];
@@ -317,6 +322,7 @@ export class LinuxNativeCaptureSession {
 		if (this.paused) {
 			return;
 		}
+		this.hyprlandCursor?.pause();
 		this.write("pause");
 		this.paused = true;
 		this.cursorPauseStartedAtMs = Date.now();
@@ -326,6 +332,7 @@ export class LinuxNativeCaptureSession {
 		if (!this.paused) {
 			return;
 		}
+		this.hyprlandCursor?.resume();
 		this.write("resume");
 		this.completeCursorPauseRange();
 		this.paused = false;
@@ -344,6 +351,11 @@ export class LinuxNativeCaptureSession {
 		return this.paused;
 	}
 
+	/** The cursor mode actually negotiated by the portal. */
+	get cursorMode(): LinuxCaptureConfig["cursorMode"] {
+		return this.negotiatedCursorMode ?? this.config.cursorMode;
+	}
+
 	/**
 	 * What the portal granted. Known from `stream-started`, so it is populated by
 	 * the time [`waitUntilCapturing`] resolves.
@@ -354,15 +366,6 @@ export class LinuxNativeCaptureSession {
 	 */
 	get grantedSourceKind(): LinuxCaptureSourceKind | undefined {
 		return this.sourceKind;
-	}
-
-	/**
-	 * The cursor mode the helper really negotiates, known once `start()` resolves.
-	 * A portal without EMBEDDED gets METADATA instead (#1357), so the cursor has
-	 * to be drawn by the editor even though the system cursor was asked for.
-	 */
-	get cursorMode(): LinuxCaptureConfig["cursorMode"] {
-		return this.negotiatedCursorMode ?? this.config.cursorMode;
 	}
 
 	/**
@@ -449,6 +452,8 @@ export class LinuxNativeCaptureSession {
 	}
 
 	private kill() {
+		this.hyprlandCursor?.stop();
+		this.hyprlandCursor = null;
 		const child = this.process;
 		if (!child || child.killed) {
 			return;
@@ -480,12 +485,42 @@ export class LinuxNativeCaptureSession {
 
 	private handleEvent(payload: PipeWireHelperEvent) {
 		switch (payload.event) {
-			case "ready":
-				if (payload.cursorMode === "metadata" || payload.cursorMode === "embedded") {
+			case "ready": {
+				if (
+					payload.cursorMode === "metadata" ||
+					payload.cursorMode === "embedded" ||
+					payload.cursorMode === "hidden"
+				) {
 					this.negotiatedCursorMode = payload.cursorMode;
 				}
+				this.cursorMetadataSupported =
+					typeof payload.cursorMetadataSupported === "boolean"
+						? payload.cursorMetadataSupported
+						: null;
+				this.effectiveCursorMode =
+					payload.cursorMode === "hidden"
+						? "hidden"
+						: payload.cursorMode === "embedded"
+							? "embedded"
+							: "metadata";
+				const useHyprlandPositionTelemetry =
+					this.config.cursorMode === "auto" &&
+					(this.effectiveCursorMode !== "metadata" || this.cursorMetadataSupported === false);
+				this.ensureHyprlandCursorTracker(
+					useHyprlandPositionTelemetry || this.effectiveCursorMode === "hidden",
+				);
+				console.info(
+					"[capture-linux] cursor negotiation",
+					JSON.stringify({
+						requested: this.config.cursorMode,
+						effective: this.effectiveCursorMode,
+						metadataSupported: payload.cursorMetadataSupported ?? null,
+						hyprlandTracker: Boolean(this.hyprlandCursor),
+					}),
+				);
 				this.resolveReady();
 				return;
+			}
 
 			case "source-selected":
 				if (payload.sourceKind) {
@@ -519,6 +554,24 @@ export class LinuxNativeCaptureSession {
 						sourceKind: payload.sourceKind ?? null,
 					}),
 				);
+				// Some helper/portal combinations report the negotiated mode before
+				// the stream details are available. Re-evaluate here so hidden-cursor
+				// capture cannot silently lose its Hyprland position telemetry.
+				this.ensureHyprlandCursorTracker(
+					(this.config.cursorMode === "auto" &&
+						(this.effectiveCursorMode !== "metadata" || this.cursorMetadataSupported === false)) ||
+					this.effectiveCursorMode === "hidden",
+				);
+				if (this.hyprlandCursor && !this.hyprlandCursor.hasCaptureGeometry()) {
+					this.hyprlandCursor.setCaptureGeometry({
+						position:
+							payload.positionX != null && payload.positionY != null
+								? { x: payload.positionX, y: payload.positionY }
+								: null,
+						width: payload.logicalWidth ?? payload.width,
+						height: payload.logicalHeight ?? payload.height,
+					});
+				}
 				return;
 
 			case "audio-source":
@@ -555,6 +608,22 @@ export class LinuxNativeCaptureSession {
 				// picker is dropped rather than left pinned to the start.
 				this.cursor.rebase(payload.timestampMs);
 				this.cursorRecordingStartMs = payload.timestampMs;
+				this.ensureHyprlandCursorTracker(
+					(this.config.cursorMode === "auto" &&
+						(this.effectiveCursorMode !== "metadata" || this.cursorMetadataSupported === false)) ||
+					this.effectiveCursorMode === "hidden",
+				);
+				this.hyprlandCursor?.rebase();
+				// Older helper builds and some portal backends may omit stream-started
+				// geometry. The encoded frame dimensions are still sufficient for the
+				// monitor-size/origin fallback in HyprlandCursorTracker.
+				if (this.hyprlandCursor && !this.hyprlandCursor.hasCaptureGeometry()) {
+					this.hyprlandCursor.setCaptureGeometry({
+						position: null,
+						width: payload.width,
+						height: payload.height,
+					});
+				}
 				this.capturing = true;
 				console.info(
 					"[capture-linux] capture started",
@@ -566,19 +635,20 @@ export class LinuxNativeCaptureSession {
 				return;
 
 			case "cursor-sample":
-				this.cursor.addSample(payload);
+				if (this.effectiveCursorMode === "metadata") this.cursor.addSample(payload);
 				return;
 
-			case "capture-stopped":
+			case "capture-stopped": {
+				const cursor =
+					this.hyprlandCursor?.stop() ??
+					compactCursorTelemetryPauseRanges(this.cursor.toRecordingData(), this.cursorPauseRanges);
+				this.hyprlandCursor = null;
 				this.stopped = {
 					path: payload.path,
 					durationMs: payload.durationMs,
 					frames: payload.frames,
 					droppedFrames: payload.dropped,
-					cursor: compactCursorTelemetryPauseRanges(
-						this.cursor.toRecordingData(),
-						this.cursorPauseRanges,
-					),
+					cursor,
 					...(this.sourceKind ? { sourceKind: this.sourceKind } : {}),
 					...(this.videoEncoder ? { videoEncoder: this.videoEncoder } : {}),
 				};
@@ -591,9 +661,12 @@ export class LinuxNativeCaptureSession {
 						convertMs: payload.convertMs,
 						uploadMs: payload.uploadMs,
 						encodeMs: payload.encodeMs,
+						cursorProvider: cursor.provider,
+						cursorSamples: cursor.samples.length,
 					}),
 				);
 				return;
+			}
 
 			case "warning":
 				console.warn(`[capture-linux] ${payload.code}: ${payload.message}`);
@@ -614,6 +687,21 @@ export class LinuxNativeCaptureSession {
 				console.info("[capture-linux][debug]", JSON.stringify(payload));
 				return;
 		}
+	}
+
+	private ensureHyprlandCursorTracker(needed: boolean) {
+		if (!needed || this.hyprlandCursor) return;
+		if (!HyprlandCursorTracker.isAvailable()) {
+			console.warn(
+				"[capture-linux] position-only cursor capture requested, but the Hyprland IPC socket is unavailable",
+			);
+			return;
+		}
+		this.hyprlandCursor = new HyprlandCursorTracker({
+			sampleIntervalMs: this.config.sampleIntervalMs ?? 33,
+			maxSamples: this.config.maxCursorSamples,
+		});
+		this.hyprlandCursor.start();
 	}
 
 	private resolveReady() {

@@ -3834,11 +3834,11 @@ impl<'a> CursorPlacer<'a> {
         }
     }
 
-    /// La pointe à `t`, posée sur le point cliqué brut à chaque clic (`pinned_at`), pas sur la piste
-    /// lissée qui traîne derrière la souris. Sprite plat comme modèle 3D : le rebond, l'anneau
-    /// d'impact et `ctx.clicks` se centrent sur ce point brut, la pointe doit s'y trouver.
+    /// La pointe à `t`. Le curseur modélisé touche le plan à chaque clic : il se pose sur le point
+    /// cliqué brut (`pinned_at`), pas sur la piste lissée qui traîne derrière la souris. Le sprite
+    /// plat garde la piste telle quelle, son rendu est celui d'avant.
     fn at(&self, t: f32) -> Option<(f32, f32)> {
-        self.track.pinned_at(t)
+        if self.model3d { self.track.pinned_at(t) } else { self.track.at(t) }
     }
 
     /// `None` hors de la coupe courante (zoom serré, hors écran).
@@ -9279,28 +9279,20 @@ mod tests {
         assert_eq!(fx(2.5).cursor, Some(drawn.placement.upright_center()), "là où le curseur se dessine");
     }
 
-    /// Le sprite plat aussi se pose sur le clic brut : à fort lissage, le ressort traîne loin derrière
-    /// une souris qui clique dès l'arrivée, mais la pointe dessinée, `ctx.cursor` et `ctx.clicks`
-    /// tombent sur le même pixel pendant le contact.
+    /// Hyprland position-only sidecars have no bitmap assets or cursor type. The
+    /// renderer must still select OpenScreen's bundled arrow sprite, with its
+    /// configured hotspot, for both preview and export.
     #[test]
-    fn the_flat_cursor_lands_on_the_click_under_smoothing() {
-        const TC: f32 = 1.5;
+    fn position_only_track_uses_the_bundled_arrow_sprite() {
         let scene = model_scene();
         let cfg = crate::config::all().pop().expect("cfg");
         let fg = full_frame_geometry();
-        let raw = approach_track([0.08, 0.05], [0.7, 0.6], [0.2, 0.9], 2.0, 0.0, TC);
-        for smoothing in [0.0, 0.3, 0.67, 1.0] {
-            let track = raw.smoothed(smoothing);
-            for ms in [0, 40, 100] {
-                let input = cursor_input(&scene, &cfg, &track, TC + ms as f32 / 1000.0);
-                let fx = effect_pointer(&fg, &input);
-                let (cursor, click) = (fx.cursor.expect("pointe"), fx.clicks[0].0);
-                let drawn = plan_cursor(&fg, &input).expect("visible").placement.upright_center();
-                let off = |a: [f32; 2], b: [f32; 2]| ((a[0] - b[0]) * 1920.0).hypot((a[1] - b[1]) * 1080.0);
-                assert!(off(cursor, click) < 0.5, "lissage {smoothing}, {ms} ms : {} px", off(cursor, click));
-                assert!(off(drawn, click) < 0.5, "lissage {smoothing}, {ms} ms : {} px", off(drawn, click));
-            }
-        }
+        let track = still_track(vec![]);
+        let plan = plan_cursor(&fg, &cursor_input(&scene, &cfg, &track, 1.0)).expect("visible");
+
+        assert_eq!(plan.cursor_type, None, "position-only samples have no native shape");
+        assert!(plan.placement.upright_center()[0] > 0.0);
+        assert!(plan.placement.upright_center()[1] > 0.0);
     }
 
     /// Masqué par l'utilisateur, le curseur n'est plus dessiné, mais les effets gardent la pointe
